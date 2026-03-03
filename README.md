@@ -86,7 +86,4 @@ BarsTool convert folder <input_dir> <output_dir> [--wav|--bfwav]
 ## Notes
 
 - WAV files are automatically converted to BFWAV (DSP ADPCM) when added to BARS files.
-- AMTA metadata is auto-generated from the audio properties (sample rate, channels, loop points, duration).
-- Anywhere a file path is accepted for `bars add` or `bars create`, a folder path can be used instead -- all `.wav` and `.bfwav` files in the folder will be included.
-- Loop information from WAV `smpl` chunks is preserved through conversion.
-- Read/write operations on existing BARS and BARSLIST files produce byte-identical output (roundtrip fidelity).
+- AMTA metadata is auto generated from the audio properties (sample rate, channels, loop points, duration).
