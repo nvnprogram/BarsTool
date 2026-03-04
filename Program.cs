@@ -129,7 +129,8 @@ static int HandleBars(string[] args)
                     string audioMagic = System.Text.Encoding.ASCII.GetString(asset.AudioData, 0, 4);
                     audioInfo = $"{audioMagic}, {asset.AudioData.Length} bytes";
                 }
-                Console.WriteLine($"  {asset.Name} [0x{asset.Hash:X8}] - AMTA: {asset.AmtaData?.Length ?? 0}B, Audio: {audioInfo}");
+                int amtaSize = asset.Amta?.BuildNew().Length ?? 0;
+                Console.WriteLine($"  {asset.Name} [0x{asset.Hash:X8}] - AMTA: {amtaSize}B, Audio: {audioInfo}");
             }
             return 0;
         }
@@ -160,8 +161,8 @@ static int HandleBars(string[] args)
 
                 byte[] bfwavData = LoadAsBfwav(audioPath);
                 var bfwavInfo = BfwavFile.ReadInfo(bfwavData);
-                var amta = AmtaFile.CreateFromBfwav(assetName, bfwavInfo);
-                bars.AddAudio(assetName, amta.BuildNew(), bfwavData);
+                var amta = AmtaFile.CreateFromBfwav(assetName, bfwavInfo, bfwavData);
+                bars.AddAudio(assetName, amta, bfwavData);
                 Console.WriteLine($"Added '{assetName}'");
             }
 
@@ -195,8 +196,8 @@ static int HandleBars(string[] args)
                 byte[] bfwavData = LoadAsBfwav(audioPath);
 
                 var bfwavInfo = BfwavFile.ReadInfo(bfwavData);
-                var amta = AmtaFile.CreateFromBfwav(assetName, bfwavInfo);
-                bars.AddAudio(assetName, amta.BuildNew(), bfwavData);
+                var amta = AmtaFile.CreateFromBfwav(assetName, bfwavInfo, bfwavData);
+                bars.AddAudio(assetName, amta, bfwavData);
                 Console.WriteLine($"Added '{assetName}'");
             }
 

@@ -95,6 +95,69 @@ public static class BfwavFile
         return outStream.ToArray();
     }
 
+    public static (float Loudness, float Peak) ComputeAudioMetrics(byte[] bfwavData)
+    {
+        byte[] wavData = ConvertToWav(bfwavData);
+
+        using var ms = new MemoryStream(wavData);
+        using var reader = new BinaryReader(ms, Encoding.UTF8);
+
+        reader.ReadBytes(4); // "RIFF"
+        reader.ReadInt32();  // file size
+        reader.ReadBytes(4); // "WAVE"
+
+        int channels = 0;
+        int bitsPerSample = 0;
+
+        while (ms.Position < ms.Length)
+        {
+            string chunkId = Encoding.ASCII.GetString(reader.ReadBytes(4));
+            int chunkSize = reader.ReadInt32();
+
+            if (chunkId == "fmt ")
+            {
+                reader.ReadInt16(); // format tag
+                channels = reader.ReadInt16();
+                reader.ReadInt32(); // sample rate
+                reader.ReadInt32(); // byte rate
+                reader.ReadInt16(); // block align
+                bitsPerSample = reader.ReadInt16();
+                if (chunkSize > 16)
+                    reader.ReadBytes(chunkSize - 16);
+            }
+            else if (chunkId == "data")
+            {
+                if (bitsPerSample != 16 || chunkSize == 0)
+                    return (0f, 0f);
+
+                int totalSamples = chunkSize / 2;
+                double sumSquares = 0;
+                int maxAbs = 0;
+
+                for (int i = 0; i < totalSamples; i++)
+                {
+                    short sample = reader.ReadInt16();
+                    int abs = Math.Abs((int)sample);
+                    if (abs > maxAbs) maxAbs = abs;
+                    double norm = sample / 32768.0;
+                    sumSquares += norm * norm;
+                }
+
+                float peak = maxAbs / 32768f;
+                double rms = Math.Sqrt(sumSquares / totalSamples);
+                float loudness = rms > 0 ? (float)(20 * Math.Log10(rms)) : -100f;
+
+                return (loudness, peak);
+            }
+            else
+            {
+                reader.ReadBytes(chunkSize);
+            }
+        }
+
+        return (0f, 0f);
+    }
+
     private static byte[] BuildBfwav(GcAdpcmFormat adpcm)
     {
         int channelCount = adpcm.ChannelCount;

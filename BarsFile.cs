@@ -44,22 +44,17 @@ public class BarsFile
         {
             var asset = new BarsAsset { Hash = hashes[i] };
 
-            int amtaEnd = DetermineBlockEnd(amtaOffsets[i], i, amtaOffsets, audioOffsets, data.Length);
-            int amtaLen = amtaEnd - amtaOffsets[i];
-            asset.AmtaData = new byte[amtaLen];
-            Array.Copy(data, amtaOffsets[i], asset.AmtaData, 0, amtaLen);
-
+            int amtaTotalSize = BitConverter.ToInt32(data, amtaOffsets[i] + 8);
             try
             {
-                var amta = AmtaFile.Read(asset.AmtaData);
-                asset.Name = amta.Name;
+                asset.Amta = AmtaFile.Read(data, amtaOffsets[i], amtaTotalSize);
+                asset.Name = asset.Amta.Name;
             }
             catch
             {
                 asset.Name = $"unknown_{hashes[i]:X8}";
             }
 
-            // Read audio data (may be -1 / 0xFFFFFFFF if no audio)
             if (audioOffsets[i] != -1 && audioOffsets[i] != 0)
             {
                 int audioEnd = DetermineAudioEnd(audioOffsets[i], i, audioOffsets, data.Length);
@@ -76,18 +71,20 @@ public class BarsFile
 
     public byte[] Write()
     {
-        // Sort assets by CRC32 hash for binary search
         var sorted = Assets.OrderBy(a => a.Hash).ToList();
-
         int assetCount = sorted.Count;
         int headerSize = 0x10 + assetCount * 4 + assetCount * 8;
+
+        var amtaBytesList = new byte[assetCount][];
+        for (int i = 0; i < assetCount; i++)
+            amtaBytesList[i] = sorted[i].Amta!.BuildNew();
 
         var amtaPositions = new int[assetCount];
         int pos = headerSize;
         for (int i = 0; i < assetCount; i++)
         {
             amtaPositions[i] = pos;
-            pos += sorted[i].AmtaData?.Length ?? 0;
+            pos += amtaBytesList[i].Length;
         }
 
         var audioPositions = new int[assetCount];
@@ -126,17 +123,13 @@ public class BarsFile
         }
 
         for (int i = 0; i < assetCount; i++)
-        {
-            if (sorted[i].AmtaData != null)
-                writer.Write(sorted[i].AmtaData!);
-        }
+            writer.Write(amtaBytesList[i]);
 
         for (int i = 0; i < assetCount; i++)
         {
             if (audioPositions[i] == -1)
                 continue;
 
-            // Pad to alignment
             while (ms.Position < audioPositions[i])
                 writer.Write((byte)0);
 
@@ -148,18 +141,15 @@ public class BarsFile
 
     public void Save(string path) => File.WriteAllBytes(path, Write());
 
-    public void AddAudio(string name, byte[] amtaData, byte[]? audioData)
+    public void AddAudio(string name, AmtaFile amta, byte[]? audioData)
     {
         uint hash = Crc32.Compute(name);
-
-        // Remove existing with same hash
         Assets.RemoveAll(a => a.Hash == hash);
-
         Assets.Add(new BarsAsset
         {
             Hash = hash,
             Name = name,
-            AmtaData = amtaData,
+            Amta = amta,
             AudioData = audioData
         });
     }
@@ -175,19 +165,6 @@ public class BarsFile
     {
         uint hash = Crc32.Compute(name);
         return Assets.FirstOrDefault(a => a.Hash == hash);
-    }
-
-    private static int DetermineBlockEnd(int blockStart, int index, int[] amtaOffsets, int[] audioOffsets, int fileSize)
-    {
-        int minNext = fileSize;
-        for (int i = 0; i < amtaOffsets.Length; i++)
-        {
-            if (amtaOffsets[i] > blockStart && amtaOffsets[i] < minNext)
-                minNext = amtaOffsets[i];
-            if (audioOffsets[i] > 0 && audioOffsets[i] != -1 && audioOffsets[i] > blockStart && audioOffsets[i] < minNext)
-                minNext = audioOffsets[i];
-        }
-        return minNext;
     }
 
     private static int DetermineAudioEnd(int audioStart, int index, int[] audioOffsets, int fileSize)
@@ -209,6 +186,6 @@ public class BarsAsset
 {
     public uint Hash { get; set; }
     public string Name { get; set; } = string.Empty;
-    public byte[]? AmtaData { get; set; }
+    public AmtaFile? Amta { get; set; }
     public byte[]? AudioData { get; set; }
 }
