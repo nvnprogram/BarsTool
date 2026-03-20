@@ -19,7 +19,7 @@ public class AmtaFile
     public float AmplitudePeak { get; set; }
     public List<(int ChannelCount, float Volume)> StreamTracks { get; set; } = [];
     public List<AmtaMarker> Markers { get; set; } = [];
-    public List<(string Name, int RawValue)> ExtEntries { get; set; } = [];
+    public List<AmtaExtEntry> ExtEntries { get; set; } = [];
 
     public static AmtaFile Read(byte[] data) => Read(data, 0, data.Length);
 
@@ -29,15 +29,14 @@ public class AmtaFile
         using var reader = new BinaryReader(ms, Encoding.UTF8);
 
         var amta = new AmtaFile();
-        long amtaStart = 0;
 
         uint magic = reader.ReadUInt32();
         if (magic != 0x41544D41) // "AMTA"
             throw new InvalidDataException("Not a valid AMTA block.");
 
         reader.ReadUInt16(); // BOM (0xFEFF)
-        reader.ReadByte();   // padding at offset 6
-        amta.Version = reader.ReadByte(); // version at offset 7
+        reader.ReadByte();   // padding
+        amta.Version = reader.ReadByte();
 
         int totalSize = reader.ReadInt32();   // 0x08
         int dataOffset = reader.ReadInt32();  // 0x0C
@@ -45,9 +44,9 @@ public class AmtaFile
         int extOffset = reader.ReadInt32();   // 0x14
         int strgOffset = reader.ReadInt32();  // 0x18
 
-        long strgDataStart = amtaStart + strgOffset + 8;
+        long strgDataStart = strgOffset + 8;
 
-        ms.Position = amtaStart + dataOffset;
+        ms.Position = dataOffset;
         reader.ReadUInt32(); // "DATA"
         reader.ReadInt32();  // content size
 
@@ -70,12 +69,10 @@ public class AmtaFile
         if (amta.Version >= 4)
             amta.AmplitudePeak = reader.ReadSingle();
 
-        long savedPos = ms.Position;
         ms.Position = strgDataStart + nameOffsetInStrg;
-        amta.Name = ReadNullTerminated(reader);
-        ms.Position = savedPos;
+        amta.Name = Encoding.UTF8.GetString(ReadRawNullTerminated(reader));
 
-        ms.Position = amtaStart + markOffset;
+        ms.Position = markOffset;
         reader.ReadUInt32(); // "MARK"
         reader.ReadInt32();  // content size
         int markCount = reader.ReadInt32();
@@ -85,9 +82,9 @@ public class AmtaFile
             marker.Id = reader.ReadInt32();
             uint markerNameOff = reader.ReadUInt32();
 
-            savedPos = ms.Position;
+            long savedPos = ms.Position;
             ms.Position = strgDataStart + markerNameOff;
-            marker.Name = ReadNullTerminated(reader);
+            marker.NameBytes = ReadRawNullTerminated(reader);
             ms.Position = savedPos;
 
             marker.StartPos = reader.ReadInt32();
@@ -95,7 +92,7 @@ public class AmtaFile
             amta.Markers.Add(marker);
         }
 
-        ms.Position = amtaStart + extOffset;
+        ms.Position = extOffset;
         reader.ReadUInt32(); // "EXT_"
         reader.ReadInt32();  // content size
         int extCount = reader.ReadInt32();
@@ -104,56 +101,65 @@ public class AmtaFile
             int nameOff = reader.ReadInt32();
             int rawValue = reader.ReadInt32();
 
-            savedPos = ms.Position;
+            long savedPos = ms.Position;
             ms.Position = strgDataStart + nameOff;
-            string extName = ReadNullTerminated(reader);
+            byte[] nameBytes = ReadRawNullTerminated(reader);
             ms.Position = savedPos;
 
-            amta.ExtEntries.Add((extName, rawValue));
+            amta.ExtEntries.Add(new AmtaExtEntry { NameBytes = nameBytes, RawValue = rawValue });
         }
 
         return amta;
     }
 
-    private static string ReadNullTerminated(BinaryReader reader)
+    private static byte[] ReadRawNullTerminated(BinaryReader reader)
     {
-        var sb = new StringBuilder();
+        var bytes = new List<byte>();
         byte b;
         while (reader.BaseStream.Position < reader.BaseStream.Length && (b = reader.ReadByte()) != 0)
-            sb.Append((char)b);
-        return sb.ToString();
+            bytes.Add(b);
+        return bytes.ToArray();
     }
 
     public byte[] Write() => BuildNew();
 
     public byte[] BuildNew()
     {
-        var strgStream = new MemoryStream();
+        byte[] nameBytes = Encoding.UTF8.GetBytes(Name);
 
-        strgStream.Write(Encoding.UTF8.GetBytes(Name));
-        strgStream.WriteByte(0);
+        // Build STRG with exact-match string deduplication.
+        // Process in order: asset name, then markers, then ext entries.
+        var strgBuf = new List<byte>();
+        var knownOffsets = new Dictionary<ByteArrayKey, int>();
 
-        var markerStrgOffsets = new List<uint>();
-        foreach (var marker in Markers)
+        int WriteOrReuse(byte[] bytes)
         {
-            markerStrgOffsets.Add((uint)strgStream.Position);
-            strgStream.Write(Encoding.UTF8.GetBytes(marker.Name));
-            strgStream.WriteByte(0);
+            var key = new ByteArrayKey(bytes);
+            if (knownOffsets.TryGetValue(key, out int existing))
+                return existing;
+            int off = strgBuf.Count;
+            knownOffsets[key] = off;
+            strgBuf.AddRange(bytes);
+            strgBuf.Add(0);
+            return off;
         }
 
-        var extStrgOffsets = new List<uint>();
-        foreach (var (name, _) in ExtEntries)
-        {
-            extStrgOffsets.Add((uint)strgStream.Position);
-            strgStream.Write(Encoding.UTF8.GetBytes(name));
-            strgStream.WriteByte(0);
-        }
+        WriteOrReuse(nameBytes);
 
-        byte[] strgData = strgStream.ToArray();
+        var markerStrgOffsets = new uint[Markers.Count];
+        for (int i = 0; i < Markers.Count; i++)
+            markerStrgOffsets[i] = (uint)WriteOrReuse(Markers[i].NameBytes);
 
+        var extStrgOffsets = new uint[ExtEntries.Count];
+        for (int i = 0; i < ExtEntries.Count; i++)
+            extStrgOffsets[i] = (uint)WriteOrReuse(ExtEntries[i].NameBytes);
+
+        byte[] strgData = strgBuf.ToArray();
+
+        // DATA section content
         var dataContent = new MemoryStream();
         var dw = new BinaryWriter(dataContent, Encoding.UTF8);
-        dw.Write((uint)0); // name always at STRG offset 0
+        dw.Write((uint)0); // name offset always 0
         dw.Write(UnknownDataField);
         dw.Write(TrackType);
         dw.Write(WaveChannelCount);
@@ -164,7 +170,6 @@ public class AmtaFile
         dw.Write(LoopStart);
         dw.Write(LoopEnd);
         dw.Write(Loudness);
-
         for (int i = 0; i < 8; i++)
         {
             if (i < StreamTracks.Count)
@@ -178,12 +183,11 @@ public class AmtaFile
                 dw.Write(0f);
             }
         }
-
         if (Version >= 4)
             dw.Write(AmplitudePeak);
-
         byte[] dataBytes = dataContent.ToArray();
 
+        // MARK section content
         var markContent = new MemoryStream();
         var mw = new BinaryWriter(markContent, Encoding.UTF8);
         mw.Write(Markers.Count);
@@ -196,6 +200,7 @@ public class AmtaFile
         }
         byte[] markBytes = markContent.ToArray();
 
+        // EXT_ section content
         var extContent = new MemoryStream();
         var ew = new BinaryWriter(extContent, Encoding.UTF8);
         ew.Write(ExtEntries.Count);
@@ -206,6 +211,7 @@ public class AmtaFile
         }
         byte[] extBytes = extContent.ToArray();
 
+        // Compute section offsets
         int headerSize = 0x1C;
         int dataSecStart = headerSize;
         int markSecStart = dataSecStart + 8 + dataBytes.Length;
@@ -248,12 +254,72 @@ public class AmtaFile
         return ms.ToArray();
     }
 
+    private readonly struct ByteArrayKey : IEquatable<ByteArrayKey>
+    {
+        private readonly byte[] _data;
+        private readonly int _hash;
+
+        public ByteArrayKey(byte[] data)
+        {
+            _data = data;
+            int h = 17;
+            foreach (byte b in data) h = h * 31 + b;
+            _hash = h;
+        }
+
+        public override int GetHashCode() => _hash;
+        public override bool Equals(object? obj) => obj is ByteArrayKey other && Equals(other);
+        public bool Equals(ByteArrayKey other) => _data.AsSpan().SequenceEqual(other._data);
+    }
+
+    public static AmtaFile CreateFromBfstm(string name, BfstmInfo info, byte[] bfstmData)
+    {
+        var (loudness, peak) = BfstmFile.ComputeAudioMetrics(bfstmData);
+
+        byte flags = 2;
+        if (info.IsLooped) flags |= 1;
+        flags |= 4;
+
+        int trackCount = 1;
+        var streamTracks = new List<(int ChannelCount, float Volume)>();
+        if (info.ChannelCount <= 2)
+        {
+            streamTracks.Add((info.ChannelCount, 1.0f));
+        }
+        else
+        {
+            trackCount = info.ChannelCount / 2;
+            for (int i = 0; i < trackCount; i++)
+                streamTracks.Add((2, 1.0f));
+        }
+
+        return new AmtaFile
+        {
+            Name = name,
+            Version = 4,
+            UnknownDataField = info.SampleCount,
+            TrackType = 1,
+            WaveChannelCount = (byte)info.ChannelCount,
+            StreamTrackCount = (byte)trackCount,
+            Flags = flags,
+            Duration = info.SampleCount / (float)info.SampleRate,
+            SampleRate = info.SampleRate,
+            LoopStart = info.IsLooped ? info.LoopStart : 0,
+            LoopEnd = info.SampleCount,
+            Loudness = loudness,
+            AmplitudePeak = peak,
+            StreamTracks = streamTracks,
+            Markers = [],
+            ExtEntries = [new AmtaExtEntry { NameBytes = "ltl"u8.ToArray(), RawValue = BitConverter.SingleToInt32Bits(loudness) }],
+        };
+    }
+
     public static AmtaFile CreateFromBfwav(string name, BfwavInfo info, byte[] bfwavData)
     {
         var (loudness, peak) = BfwavFile.ComputeAudioMetrics(bfwavData);
         int normalizedSamples = (int)Math.Ceiling((long)info.SampleCount * 48000.0 / info.SampleRate);
 
-        var amta = new AmtaFile
+        return new AmtaFile
         {
             Name = name,
             Version = 4,
@@ -270,10 +336,8 @@ public class AmtaFile
             AmplitudePeak = peak,
             StreamTracks = [],
             Markers = [],
-            ExtEntries = [("ltl", BitConverter.SingleToInt32Bits(loudness))],
+            ExtEntries = [new AmtaExtEntry { NameBytes = "ltl"u8.ToArray(), RawValue = BitConverter.SingleToInt32Bits(loudness) }],
         };
-
-        return amta;
     }
 
     private static int AlignUp(int value, int alignment) =>
@@ -283,7 +347,15 @@ public class AmtaFile
 public class AmtaMarker
 {
     public int Id { get; set; }
-    public string Name { get; set; } = string.Empty;
+    public byte[] NameBytes { get; set; } = [];
+    public string Name => Encoding.UTF8.GetString(NameBytes);
     public int StartPos { get; set; }
     public int Length { get; set; }
+}
+
+public class AmtaExtEntry
+{
+    public byte[] NameBytes { get; set; } = [];
+    public string Name => Encoding.UTF8.GetString(NameBytes);
+    public int RawValue { get; set; }
 }
